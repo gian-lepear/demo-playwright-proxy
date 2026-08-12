@@ -5,8 +5,6 @@ Funciona. Oito linhas e a banda cai. Se o seu caso é esse, pare aqui.
     uv run python 01_ingenuo.py
 """
 
-from __future__ import annotations
-
 from playwright.sync_api import sync_playwright
 
 from comum import ALVO, BLOQUEADOS_ROUTE, Medicao, contar_bytes, imprimir

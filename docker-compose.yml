@@ -1,18 +1,15 @@
-# Proxy autenticado local. Sobe com `just up`, ou `docker compose up -d`.
-#
-# O ponto do demo é que nada aqui custa dinheiro. Um proxy residencial de
-# verdade cobra por gigabyte, e é justamente por isso que economizar banda
-# importa. Mas o que quebra o Chrome é a autenticação, não o IP residencial, e
-# autenticação um Squid local reproduz de graça.
+# Proxy autenticado local. Sobe com `just up`. O porquê de um Squid no lugar de
+# um proxy pago está em squid/squid.conf.
 name: demo-playwright-proxy
 
 services:
   proxy:
     # Pinado exato: `ubuntu/squid` não publica tag de major flutuante estável, e
-    # um bump silencioso de versão mudaria o formato do log que o medir.py lê.
+    # um bump silencioso mudaria o formato do log que o medir.py lê.
     image: ubuntu/squid:6.6-24.04_beta
+    # Só na loopback: usuário e senha estão versionados neste repo.
     ports:
-      - '3128:3128'
+      - '127.0.0.1:3128:3128'
     volumes:
       - ./squid/squid.conf:/etc/squid/squid.conf:ro
       - ./squid/passwd:/etc/squid/passwd:ro
@@ -20,10 +17,18 @@ services:
       # 407 é sucesso aqui: significa que o proxy subiu E está exigindo
       # credencial. Um 200 sem autenticação seria o proxy mal configurado, que é
       # o modo de falha que estragaria o demo em silêncio.
+      #
+      # Em perl porque a imagem não tem curl nem wget nem nc, e com `$$` porque
+      # o compose interpolaria `$s` como variável dele. A sonda sai de 127.0.0.1
+      # e o squid.conf mantém a loopback fora do access.log, senão ela somaria
+      # bytes na coluna de faturado que o medir.py lê.
       test:
         [
-          'CMD-SHELL',
-          'curl -s -o /dev/null -w "%{http_code}" -x http://localhost:3128 http://example.com | grep -q 407',
+          'CMD',
+          'perl',
+          '-MIO::Socket::INET',
+          '-e',
+          'my $$c = IO::Socket::INET->new("127.0.0.1:3128") or exit 1; print $$c "GET http://example.com/ HTTP/1.0\r\n\r\n"; exit(<$$c> =~ / 407 / ? 0 : 1)',
         ]
       interval: 3s
       timeout: 5s

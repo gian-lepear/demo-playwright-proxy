@@ -1,16 +1,21 @@
-# Sobe o proxy autenticado local. Precisa de docker.
+# Dependências e o browser do Playwright. O `uv sync` sozinho não baixa o Chromium.
+instalar:
+    uv sync
+    uv run playwright install chromium
+
+# Sobe o proxy autenticado local e espera ele responder 407. Precisa de docker.
 up:
-    docker compose up -d
-    @echo "proxy em localhost:3128, usuario demo, senha demo123"
+    docker compose up -d --wait
+    @echo "proxy em localhost:3128, usuário demo, senha demo123"
 
 down:
     docker compose down
 
-# A solucao conhecida, sem proxy nenhum.
+# A solução conhecida, sem proxy nenhum.
 ingenuo:
     uv run python 01_ingenuo.py
 
-# As tres formas de quebrar quando entra proxy autenticado.
+# As formas de quebrar quando entra proxy autenticado.
 quebra:
     uv run python 02_quebra.py
 
@@ -18,12 +23,10 @@ quebra:
 cdp:
     uv run python 03_cdp.py
 
-# A tabela final.
 medir:
     uv run python medir.py
 
-# Tudo, na ordem do post.
-tudo: up ingenuo quebra cdp medir
+tudo: instalar up ingenuo quebra cdp medir
 
 fmt:
     uv run ruff format . && uv run ruff check --fix .
