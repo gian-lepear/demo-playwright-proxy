@@ -1,0 +1,125 @@
+"""Peças compartilhadas pelos quatro scripts.
+
+O que importa aqui é a medição. `encodedDataLength` do CDP é byte real na rede,
+já comprimido, e é a única grandeza comparável com o que um proxy fatura.
+Somar `len(response.body())` mediria o conteúdo descomprimido e infla o número.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import time
+from dataclasses import dataclass, field
+
+ALVO = "https://books.toscrape.com/"
+
+PROXY_HOST = "localhost"
+PROXY_PORTA = 3128
+PROXY_USUARIO = "demo"
+PROXY_SENHA = "demo123"
+
+# Minúsculo é o vocabulário do `route` do Playwright.
+BLOQUEADOS_ROUTE = {"image", "stylesheet", "font", "media"}
+
+# Capitalizado é o vocabulário do CDP, e é OUTRO conjunto de strings.
+# Copiar o set de cima para o handler CDP produz um filtro que nunca casa, e não
+# dá erro nenhum: a página carrega inteira e parece que o bloqueio funciona.
+BLOQUEADOS_CDP = {"Image", "Stylesheet", "Font", "Media"}
+
+
+@dataclass
+class Medicao:
+    """Bytes contados do lado do cliente, pelo CDP."""
+
+    rotulo: str
+    requisicoes: int = 0
+    bytes_rede: int = 0
+    bloqueadas: int = 0
+    por_tipo: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def kib(self) -> float:
+        return self.bytes_rede / 1024
+
+
+def contar_bytes(cdp, medicao: Medicao) -> None:
+    """Liga o contador de bytes numa sessão CDP já criada.
+
+    `Network.enable` é obrigatório para receber `loadingFinished`, e não conflita
+    com `Fetch.enable`: são domínios diferentes. O que conflita é `Fetch.enable`
+    com o `context.route`, porque os dois disputam a interceptação.
+    """
+    cdp.send("Network.enable")
+
+    tipos: dict[str, str] = {}
+
+    def ao_responder(evento):
+        tipos[evento["requestId"]] = evento.get("type", "Other")
+
+    def ao_terminar(evento):
+        n = evento.get("encodedDataLength", 0) or 0
+        medicao.requisicoes += 1
+        medicao.bytes_rede += n
+        tipo = tipos.get(evento["requestId"], "Other")
+        medicao.por_tipo[tipo] = medicao.por_tipo.get(tipo, 0) + n
+
+    cdp.on("Network.responseReceived", ao_responder)
+    cdp.on("Network.loadingFinished", ao_terminar)
+
+
+def bytes_no_proxy(desde: float | None = None, esperar: float = 2.0) -> int | None:
+    """Bytes que o Squid recebeu da origem, ou seja o que seria faturado.
+
+    O `esperar` não é folga defensiva. O Squid só escreve a linha do CONNECT
+    quando o túnel FECHA, e o túnel fecha no `browser.close()`. Ler na hora pega
+    o túnel da execução anterior e não o desta, o que produz número trocado entre
+    dois cenários seguidos.
+
+    Devolve `None` quando o proxy não está de pé, para o script seguir medindo só
+    o lado cliente em vez de quebrar.
+    """
+    if esperar:
+        time.sleep(esperar)
+    try:
+        saida = subprocess.run(
+            ["docker", "compose", "logs", "--no-log-prefix", "proxy"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        ).stdout
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+    # Distinguir "proxy fora do ar" de "nada passou pelo proxy" importa: o
+    # segundo é justamente o resultado que o cenário de bypass quer mostrar, e
+    # devolver None ali esconderia a prova.
+    if not saida.strip():
+        return None
+
+    total = 0
+    for linha in saida.splitlines():
+        # timestamp, duração, ip, resultado/status, bytes, método, url, usuário
+        m = re.match(r"^(\d+\.\d+)\s+\d+\s+\S+\s+\S+\s+(\d+)\s+", linha)
+        if not m:
+            continue
+        quando, n = float(m.group(1)), int(m.group(2))
+        if desde is not None and quando < desde:
+            continue
+        total += n
+    return total
+
+
+def imprimir(medicao: Medicao, proxy: int | None = None) -> None:
+    print(f"\n{medicao.rotulo}")
+    print(f"  requisições concluídas : {medicao.requisicoes}")
+    if medicao.bloqueadas:
+        print(f"  requisições bloqueadas : {medicao.bloqueadas}")
+    print(f"  bytes na rede (cliente): {medicao.bytes_rede:>9,} B  = {medicao.kib:.1f} KiB")
+    if proxy is not None:
+        print(f"  bytes no proxy (faturado): {proxy:>7,} B  = {proxy / 1024:.1f} KiB")
+    if medicao.por_tipo:
+        print("  por tipo:")
+        for tipo, n in sorted(medicao.por_tipo.items(), key=lambda kv: -kv[1])[:6]:
+            print(f"    {tipo:<12} {n:>9,} B")

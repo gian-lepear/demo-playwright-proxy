@@ -1,0 +1,31 @@
+# Proxy autenticado local. Sobe com `just up`, ou `docker compose up -d`.
+#
+# O ponto do demo é que nada aqui custa dinheiro. Um proxy residencial de
+# verdade cobra por gigabyte, e é justamente por isso que economizar banda
+# importa. Mas o que quebra o Chrome é a autenticação, não o IP residencial, e
+# autenticação um Squid local reproduz de graça.
+name: demo-playwright-proxy
+
+services:
+  proxy:
+    # Pinado exato: `ubuntu/squid` não publica tag de major flutuante estável, e
+    # um bump silencioso de versão mudaria o formato do log que o medir.py lê.
+    image: ubuntu/squid:6.6-24.04_beta
+    ports:
+      - '3128:3128'
+    volumes:
+      - ./squid/squid.conf:/etc/squid/squid.conf:ro
+      - ./squid/passwd:/etc/squid/passwd:ro
+    healthcheck:
+      # 407 é sucesso aqui: significa que o proxy subiu E está exigindo
+      # credencial. Um 200 sem autenticação seria o proxy mal configurado, que é
+      # o modo de falha que estragaria o demo em silêncio.
+      test:
+        [
+          'CMD-SHELL',
+          'curl -s -o /dev/null -w "%{http_code}" -x http://localhost:3128 http://example.com | grep -q 407',
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
