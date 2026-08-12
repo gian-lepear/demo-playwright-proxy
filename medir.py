@@ -5,8 +5,6 @@
 Precisa do proxy no ar: `just up`.
 """
 
-from __future__ import annotations
-
 import time
 
 from playwright.sync_api import sync_playwright
@@ -14,35 +12,30 @@ from playwright.sync_api import sync_playwright
 from comum import (
     ALVO,
     BLOQUEADOS_CDP,
-    PROXY_HOST,
-    PROXY_PORTA,
+    PROXY,
     PROXY_SENHA,
     PROXY_USUARIO,
     Medicao,
     bytes_no_proxy,
     contar_bytes,
+    exigir_proxy,
 )
 
-PROXY = {
-    "server": f"http://{PROXY_HOST}:{PROXY_PORTA}",
-    "username": PROXY_USUARIO,
-    "password": PROXY_SENHA,
-}
-
-# O segundo eixo: bloquear e tirar do proxy são perguntas diferentes.
+# O segundo eixo: bloquear e tirar do proxy são perguntas diferentes. Num alvo
+# real entrariam aqui o CDN de estáticos, o analytics e a fonte hospedada fora.
+# `books.toscrape.com` não carrega um único domínio de terceiro, então o demo
+# tira o próprio alvo do proxy, o que não se faria em produção e só serve pra
+# mostrar o mecanismo.
 #
-# Num alvo real você listaria aqui o CDN de estáticos, o analytics e a fonte
-# hospedada fora, que a página precisa carregar mas não precisam sair pelo seu
-# IP pago. Esse é o dinheiro que ninguém pega.
-#
-# `books.toscrape.com` é simples demais para isso: ele não carrega um único
-# domínio de terceiro. Então o demo tira o PRÓPRIO alvo do proxy, que não é o
-# que se faria em produção, mas mostra o mecanismo: o cliente baixa igual, e o
-# proxy não fatura nada.
-#
-# Cuidado com a sintaxe: a lista é separada por `;`, e `;` também é separador de
-# parâmetro em query string. URL com query precisa ser codificada.
+# A lista é separada por `;`, que também separa parâmetro em query string, então
+# URL com query precisa ser codificada.
 FORA_DO_PROXY = "books.toscrape.com"
+
+CENARIOS = [
+    ("baseline", False, False),
+    ("só bloqueio", True, False),
+    ("bloqueio + bypass", True, True),
+]
 
 
 def rodar(rotulo: str, bloquear: bool, bypass: bool) -> tuple[Medicao, int | None]:
@@ -90,35 +83,33 @@ def rodar(rotulo: str, bloquear: bool, bypass: bool) -> tuple[Medicao, int | Non
     return medicao, bytes_no_proxy(desde=inicio)
 
 
-CENARIOS = [
-    ("baseline", False, False),
-    ("só bloqueio", True, False),
-    ("bloqueio + tudo DIRECT", True, True),
-]
+def delta(atual: float, base: float) -> str:
+    return "-" if not base or atual == base else f"{atual / base - 1:.1%}"
 
 
 def main() -> None:
+    exigir_proxy()
     print(f"alvo: {ALVO}\n")
+
     linhas = []
     for rotulo, bloquear, bypass in CENARIOS:
         medicao, proxy = rodar(rotulo, bloquear, bypass)
-        linhas.append((rotulo, medicao, proxy))
-        print(f"  {rotulo:<20} {medicao.requisicoes:>3} req  {medicao.kib:>7.1f} KiB")
+        linhas.append((medicao, proxy))
+        print(f"  {medicao.rotulo:<18} {medicao.requisicoes:>3} req  {medicao.kib:>7.1f} KiB")
 
-    base = linhas[0][1].bytes_rede
+    base = linhas[0][0].bytes_rede
     print("\n| Cenário | Requisições | Banda (KiB) | Delta |")
     print("| --- | ---: | ---: | ---: |")
-    for rotulo, medicao, _ in linhas:
-        delta = "-" if medicao.bytes_rede == base else f"{medicao.bytes_rede / base - 1:.1%}"
-        print(f"| {rotulo} | {medicao.requisicoes} | {medicao.kib:.1f} | {delta} |")
+    for medicao, _ in linhas:
+        campos = f"{medicao.requisicoes} | {medicao.kib:.1f} | {delta(medicao.bytes_rede, base)}"
+        print(f"| {medicao.rotulo} | {campos} |")
 
-    if all(p is not None for _, _, p in linhas):
-        base_proxy = linhas[0][2]
+    if all(proxy is not None for _, proxy in linhas):
+        base_proxy = linhas[0][1]
         print("\n| Cenário | Faturado pelo proxy (KiB) | Delta |")
         print("| --- | ---: | ---: |")
-        for rotulo, _, proxy in linhas:
-            delta = "-" if proxy == base_proxy else f"{proxy / base_proxy - 1:.1%}"
-            print(f"| {rotulo} | {proxy / 1024:.1f} | {delta} |")
+        for medicao, proxy in linhas:
+            print(f"| {medicao.rotulo} | {proxy / 1024:.1f} | {delta(proxy, base_proxy)} |")
     print()
 
 

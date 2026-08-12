@@ -1,16 +1,17 @@
 """Peças compartilhadas pelos quatro scripts.
 
-O que importa aqui é a medição. `encodedDataLength` do CDP é byte real na rede,
-já comprimido, e é a única grandeza comparável com o que um proxy fatura.
-Somar `len(response.body())` mediria o conteúdo descomprimido e infla o número.
+`encodedDataLength` do CDP é byte real na rede, já comprimido, e é a única
+grandeza do lado cliente comparável com o que um proxy fatura. Somar
+`len(response.body())` mediria o conteúdo descomprimido e infla o número.
 """
 
-from __future__ import annotations
-
 import re
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
+
+from playwright.sync_api import CDPSession
 
 ALVO = "https://books.toscrape.com/"
 
@@ -19,19 +20,27 @@ PROXY_PORTA = 3128
 PROXY_USUARIO = "demo"
 PROXY_SENHA = "demo123"
 
+PROXY = {
+    "server": f"http://{PROXY_HOST}:{PROXY_PORTA}",
+    "username": PROXY_USUARIO,
+    "password": PROXY_SENHA,
+}
+
 # Minúsculo é o vocabulário do `route` do Playwright.
 BLOQUEADOS_ROUTE = {"image", "stylesheet", "font", "media"}
 
-# Capitalizado é o vocabulário do CDP, e é OUTRO conjunto de strings.
-# Copiar o set de cima para o handler CDP produz um filtro que nunca casa, e não
-# dá erro nenhum: a página carrega inteira e parece que o bloqueio funciona.
+# Capitalizado é o do CDP, e é OUTRO conjunto de strings. Copiar o set de cima
+# para o handler CDP dá um filtro que nunca casa, sem erro nenhum: a página
+# carrega inteira e parece que o bloqueio funcionou.
 BLOQUEADOS_CDP = {"Image", "Stylesheet", "Font", "Media"}
+
+# O Squid só escreve a linha do CONNECT quando o túnel fecha, e o túnel fecha no
+# `browser.close()`. Ler o log na hora pega o túnel da execução anterior.
+ESPERA_LOG_SQUID = 2.0
 
 
 @dataclass
 class Medicao:
-    """Bytes contados do lado do cliente, pelo CDP."""
-
     rotulo: str
     requisicoes: int = 0
     bytes_rede: int = 0
@@ -43,12 +52,26 @@ class Medicao:
         return self.bytes_rede / 1024
 
 
-def contar_bytes(cdp, medicao: Medicao) -> None:
+def exigir_proxy() -> None:
+    """Aborta antes de medir se o proxy não estiver no ar.
+
+    Sem isto o script segue adiante e imprime a explicação de sempre, que passa
+    a ser mentira: o erro na tela vira `ERR_PROXY_CONNECTION_FAILED` e a
+    narração continua falando de 407 e de timeout.
+    """
+    try:
+        socket.create_connection((PROXY_HOST, PROXY_PORTA), timeout=3).close()
+    except OSError:
+        raise SystemExit(
+            f"proxy fora do ar em {PROXY_HOST}:{PROXY_PORTA}, rode `just up`"
+        ) from None
+
+
+def contar_bytes(cdp: CDPSession, medicao: Medicao) -> None:
     """Liga o contador de bytes numa sessão CDP já criada.
 
-    `Network.enable` é obrigatório para receber `loadingFinished`, e não conflita
-    com `Fetch.enable`: são domínios diferentes. O que conflita é `Fetch.enable`
-    com o `context.route`, porque os dois disputam a interceptação.
+    `Network.enable` é obrigatório para receber `loadingFinished`. Convive com
+    `Fetch.enable`, que é outro domínio do protocolo.
     """
     cdp.send("Network.enable")
 
@@ -68,19 +91,13 @@ def contar_bytes(cdp, medicao: Medicao) -> None:
     cdp.on("Network.loadingFinished", ao_terminar)
 
 
-def bytes_no_proxy(desde: float | None = None, esperar: float = 2.0) -> int | None:
-    """Bytes que o Squid recebeu da origem, ou seja o que seria faturado.
+def bytes_no_proxy(desde: float) -> int | None:
+    """Bytes que o proxy entregou ao cliente depois de `desde`, ou seja o faturado.
 
-    O `esperar` não é folga defensiva. O Squid só escreve a linha do CONNECT
-    quando o túnel FECHA, e o túnel fecha no `browser.close()`. Ler na hora pega
-    o túnel da execução anterior e não o desta, o que produz número trocado entre
-    dois cenários seguidos.
-
-    Devolve `None` quando o proxy não está de pé, para o script seguir medindo só
-    o lado cliente em vez de quebrar.
+    Devolve `None` quando o proxy não deixou rastro nenhum, para o script seguir
+    medindo só o lado cliente em vez de quebrar.
     """
-    if esperar:
-        time.sleep(esperar)
+    time.sleep(ESPERA_LOG_SQUID)
     try:
         saida = subprocess.run(
             ["docker", "compose", "logs", "--no-log-prefix", "proxy"],
@@ -92,22 +109,16 @@ def bytes_no_proxy(desde: float | None = None, esperar: float = 2.0) -> int | No
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
 
-    # Distinguir "proxy fora do ar" de "nada passou pelo proxy" importa: o
-    # segundo é justamente o resultado que o cenário de bypass quer mostrar, e
-    # devolver None ali esconderia a prova.
     if not saida.strip():
         return None
 
     total = 0
     for linha in saida.splitlines():
-        # timestamp, duração, ip, resultado/status, bytes, método, url, usuário
+        # Campos do `logformat bytes` lá do squid.conf: hora, duração, ip,
+        # resultado/status, bytes, método, url, usuário.
         m = re.match(r"^(\d+\.\d+)\s+\d+\s+\S+\s+\S+\s+(\d+)\s+", linha)
-        if not m:
-            continue
-        quando, n = float(m.group(1)), int(m.group(2))
-        if desde is not None and quando < desde:
-            continue
-        total += n
+        if m and float(m.group(1)) >= desde:
+            total += int(m.group(2))
     return total
 
 
